@@ -292,6 +292,37 @@ pub struct PdfDocument<'a> {
     warnings: WarningSink,
 }
 
+/// The initial CTM `render_page` draws through: DPI scaling, the Y-flip from
+/// PDF's Y-up user space to device Y-down, the CropBox offset, and the page's
+/// `/Rotate`. Shared so that anything mapping user space to device pixels —
+/// `device_region_for_box`, say — agrees with what was actually drawn.
+fn page_ctm(info: &PageInfo, dpi: f64) -> Matrix {
+    let [llx, lly, urx, ury] = info.crop_box;
+    let (page_w, page_h) = ((urx - llx).abs(), (ury - lly).abs());
+    let scale = dpi / 72.0;
+    match info.rotate.rem_euclid(360) {
+        90 => {
+            // Rotate 90° CW + Y-flip: (x,y) → (y*s, x*s)
+            Matrix::new(0.0, scale, scale, 0.0, 0.0, 0.0).concat(&Matrix::translate(-llx, -lly))
+        }
+        180 => {
+            // Rotate 180° + Y-flip = just X-flip
+            Matrix::new(-scale, 0.0, 0.0, scale, page_w * scale, 0.0)
+                .concat(&Matrix::translate(-llx, -lly))
+        }
+        270 => {
+            // Rotate 270° CW + Y-flip: (x,y) → ((page_h-y)*s, (page_w-x)*s)
+            Matrix::new(0.0, -scale, -scale, 0.0, page_h * scale, page_w * scale)
+                .concat(&Matrix::translate(-llx, -lly))
+        }
+        _ => {
+            // No rotation: scale + Y-flip + CropBox offset
+            // PDF (0,0) at bottom-left → device (0, page_h*scale) at top-left
+            Matrix::new(scale, 0.0, 0.0, -scale, -llx * scale, ury * scale)
+        }
+    }
+}
+
 impl<'a> PdfDocument<'a> {
     /// Parse a PDF from bytes.
     pub fn from_bytes(data: &'a [u8]) -> Result<Self, PdfError> {
@@ -480,6 +511,47 @@ impl<'a> PdfDocument<'a> {
         }
     }
 
+    /// Where a rectangle of the page's own user space lands in the device
+    /// pixels `render_page` produces at `dpi`, as `(x, y, width, height)` with
+    /// y measured down from the top-left corner.
+    ///
+    /// `rect` is `[llx, lly, urx, ury]` in points, written the way the page
+    /// boxes are. The result is the axis-aligned box covering the rectangle's
+    /// four transformed corners, so a rotated page gives the region actually
+    /// occupied rather than a rectangle rotated out of place. It is what a
+    /// caller rendering only part of a page needs, and it is measured through
+    /// the same CTM the page was drawn with.
+    pub fn device_region_for_box(
+        &self,
+        page: usize,
+        rect: [f64; 4],
+        dpi: f64,
+    ) -> Result<(f64, f64, f64, f64), PdfError> {
+        let info = self
+            .pages
+            .get(page)
+            .ok_or(PdfError::PageOutOfRange(page, self.pages.len()))?;
+        let ctm = page_ctm(info, dpi);
+        let [llx, lly, urx, ury] = rect;
+        let corners = [
+            ctm.transform_point(llx, lly),
+            ctm.transform_point(urx, lly),
+            ctm.transform_point(urx, ury),
+            ctm.transform_point(llx, ury),
+        ];
+        let min_x = corners.iter().map(|c| c.0).fold(f64::INFINITY, f64::min);
+        let max_x = corners
+            .iter()
+            .map(|c| c.0)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let min_y = corners.iter().map(|c| c.1).fold(f64::INFINITY, f64::min);
+        let max_y = corners
+            .iter()
+            .map(|c| c.1)
+            .fold(f64::NEG_INFINITY, f64::max);
+        Ok((min_x, min_y, max_x - min_x, max_y - min_y))
+    }
+
     /// Get page info (MediaBox, CropBox, rotation, resources).
     pub fn page_info(&self, page: usize) -> Result<&PageInfo, PdfError> {
         self.pages
@@ -529,33 +601,7 @@ impl<'a> PdfDocument<'a> {
             .get(page)
             .ok_or(PdfError::PageOutOfRange(page, self.pages.len()))?;
 
-        let [llx, lly, urx, ury] = info.crop_box;
-        let (page_w, page_h) = ((urx - llx).abs(), (ury - lly).abs());
-
-        // Build initial CTM: scale by dpi/72, Y-flip (PDF Y-up → device Y-down),
-        // and offset by CropBox origin.
-        let scale = dpi / 72.0;
-        let ctm = match info.rotate.rem_euclid(360) {
-            90 => {
-                // Rotate 90° CW + Y-flip: (x,y) → (y*s, x*s)
-                Matrix::new(0.0, scale, scale, 0.0, 0.0, 0.0).concat(&Matrix::translate(-llx, -lly))
-            }
-            180 => {
-                // Rotate 180° + Y-flip = just X-flip
-                Matrix::new(-scale, 0.0, 0.0, scale, page_w * scale, 0.0)
-                    .concat(&Matrix::translate(-llx, -lly))
-            }
-            270 => {
-                // Rotate 270° CW + Y-flip: (x,y) → ((page_h-y)*s, (page_w-x)*s)
-                Matrix::new(0.0, -scale, -scale, 0.0, page_h * scale, page_w * scale)
-                    .concat(&Matrix::translate(-llx, -lly))
-            }
-            _ => {
-                // No rotation: scale + Y-flip + CropBox offset
-                // PDF (0,0) at bottom-left → device (0, page_h*scale) at top-left
-                Matrix::new(scale, 0.0, 0.0, -scale, -llx * scale, ury * scale)
-            }
-        };
+        let ctm = page_ctm(info, dpi);
 
         // Get page content stream
         let content_data = self.page_contents(page)?;
@@ -3744,6 +3790,81 @@ mod tests {
     }
 
     /// Build a minimal valid PDF for testing.
+    fn build_rotated_pdf(rotate: i32) -> Vec<u8> {
+        let mut pdf = Vec::new();
+        pdf.extend(b"%PDF-1.4\n");
+
+        let obj1_offset = pdf.len();
+        pdf.extend(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+
+        let obj2_offset = pdf.len();
+        pdf.extend(b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
+
+        let obj3_offset = pdf.len();
+        pdf.extend(
+            format!(
+                "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] /Rotate {rotate} >>\nendobj\n"
+            )
+            .as_bytes(),
+        );
+
+        let xref_offset = pdf.len();
+        pdf.extend(b"xref\n0 4\n");
+        pdf.extend(b"0000000000 65535 f\r\n");
+        pdf.extend(format!("{:010} 00000 n\r\n", obj1_offset).as_bytes());
+        pdf.extend(format!("{:010} 00000 n\r\n", obj2_offset).as_bytes());
+        pdf.extend(format!("{:010} 00000 n\r\n", obj3_offset).as_bytes());
+        pdf.extend(b"trailer\n<< /Size 4 /Root 1 0 R >>\n");
+        pdf.extend(format!("startxref\n{xref_offset}\n%%EOF\n").as_bytes());
+
+        pdf
+    }
+
+    #[test]
+    fn device_region_for_box_maps_user_space_to_device_pixels() {
+        let pdf = build_rotated_pdf(0);
+        let doc = PdfDocument::from_bytes(&pdf).unwrap();
+        // Bottom-left 50x20 of a 200x100 page, at 2x. Device y counts down, so
+        // the box that sits at the page's bottom lands at its device bottom.
+        let (x, y, w, h) = doc
+            .device_region_for_box(0, [0.0, 0.0, 50.0, 20.0], 144.0)
+            .unwrap();
+        assert_eq!((x, y, w, h), (0.0, 160.0, 100.0, 40.0));
+    }
+
+    #[test]
+    fn device_region_for_box_follows_the_page_rotation() {
+        // The same user-space box, on the same page, rotated. A quarter turn
+        // swaps the region's extent; a half turn keeps it and moves the origin.
+        // Derived from the CTM each rotation draws through, on a 200x100 page
+        // at 72 dpi: a quarter turn swaps the region's extent, and the origin
+        // follows the corner the page's own bottom-left has been turned to.
+        let cases = [
+            (0, (0.0, 80.0, 50.0, 20.0)),
+            (90, (0.0, 0.0, 20.0, 50.0)),
+            (180, (150.0, 0.0, 50.0, 20.0)),
+            (270, (80.0, 150.0, 20.0, 50.0)),
+        ];
+        for (rotate, expected) in cases {
+            let pdf = build_rotated_pdf(rotate);
+            let doc = PdfDocument::from_bytes(&pdf).unwrap();
+            let got = doc
+                .device_region_for_box(0, [0.0, 0.0, 50.0, 20.0], 72.0)
+                .unwrap();
+            assert_eq!(got, expected, "rotate {rotate}");
+        }
+    }
+
+    #[test]
+    fn device_region_for_box_rejects_a_page_that_is_not_there() {
+        let pdf = build_minimal_pdf();
+        let doc = PdfDocument::from_bytes(&pdf).unwrap();
+        assert!(matches!(
+            doc.device_region_for_box(5, [0.0, 0.0, 1.0, 1.0], 72.0),
+            Err(PdfError::PageOutOfRange(5, 1))
+        ));
+    }
+
     fn build_minimal_pdf() -> Vec<u8> {
         let mut pdf = Vec::new();
         pdf.extend(b"%PDF-1.4\n");

@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`--crop-box <llx> <lly> <urx> <ury>` for `--device png`, and
+  `render_region_prepared_with_background` in `stet-render`.** Renders only
+  the named region of the page instead of the whole page, in points in the
+  PDF's own user space, as the page boxes are written. Placed artwork cropped
+  to a small part of a large artboard no longer pays to rasterize the whole
+  artboard: on a 2560x1600 pt illustration cropped to a 491x1238 pt strip,
+  rendering the region takes 51s against 90s for the page, pixel for pixel the
+  same result. PDF input only, and not with `--width`/`--height`.
+  `PdfDocument::device_region_for_box` maps a user-space rectangle to the
+  device pixels `render_page` produces, through the same CTM the page is drawn
+  with, so a page with `/Rotate` gives the region the artwork occupies.
+
 - **`--transparent` for `--device png`, and `render_to_rgba_with_background`
   in `stet-render`.** Pages are rendered onto a transparent backdrop and
   composited onto white paper only as the last step; the option skips that

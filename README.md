@@ -194,6 +194,7 @@ zoom presets, minimap navigation, and drag-and-drop.
 | `--no-icc` | Disable ICC color management entirely |
 | `--no-aa` | Disable anti-aliasing |
 | `--transparent` | Leave unpainted areas transparent instead of white paper (`--device png` only; straight-alpha RGBA) |
+| `--crop-box <llx> <lly> <urx> <ury>` | Render only this region of the page, in points in the PDF's own user space (PDF input, `--device png`, not with `--width`/`--height`) |
 | `--output-profile <FILE>` | Generic ICC output profile (also used as source CMYK when `--cmyk-profile` is absent) |
 | `--cmyk-profile <FILE>` | Pin the source CMYK ICC profile for CMYK→sRGB conversion |
 | `--use-output-intent` | Honour the PDF's embedded OutputIntent as the source CMYK profile (default) |

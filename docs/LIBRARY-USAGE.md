@@ -98,6 +98,45 @@ let rgba = stet_render::render_to_rgba_with_background(
 
 The CLI exposes the same thing as `--transparent`, for `--device png`.
 
+## Rendering Part of a Page
+
+`render_region_prepared_with_background` draws one region of a display list
+rather than the whole page. Artwork cropped to a small part of a large
+artboard otherwise pays to rasterize the artboard and throws most of it away.
+
+The region is given in device pixels. For PDF input,
+`PdfDocument::device_region_for_box` converts a rectangle of the page's own
+user space — the numbers the page boxes are written in — through the same CTM
+`render_page` draws with, so a page with `/Rotate` gives the region the
+artwork actually occupies:
+
+```rust
+use stet_pdf_reader::PdfDocument;
+use stet_graphics::layer_set::LayerSet;
+
+let doc = PdfDocument::from_bytes(&pdf_data)?;
+let dpi = 300.0;
+// [llx, lly, urx, ury] in points, as PDF boxes are written.
+let (x, y, w, h) = doc.device_region_for_box(0, [1000.0, 200.0, 1491.0, 1438.0], dpi)?;
+
+let display_list = doc.render_page(0, dpi)?;
+let prepared = stet_render::prepare_display_list(&display_list);
+let rgba = stet_render::render_region_prepared_with_background(
+    &display_list, &prepared,
+    x, y, w, h,                       // region, device pixels
+    w.round() as u32, h.round() as u32,
+    dpi,
+    Some(doc.icc_cache()),
+    None,                             // image cache
+    false,                            // no_aa
+    &LayerSet::new(),
+    true,                             // transparent
+);
+```
+
+`render_region_prepared` is the same thing on white paper with no layer set.
+The CLI exposes this as `--crop-box`.
+
 ## Diagnostics
 
 An empty page list is not necessarily an error. The usual cause is a program

@@ -132,6 +132,7 @@ fn main() {
     let mut max_vm_mb: Option<u64> = None;
     let mut password: Option<String> = None;
     let mut target_width: Option<u32> = None;
+    let mut crop_box: Option<[f64; 4]> = None;
     let mut target_height: Option<u32> = None;
     let mut page_size: Option<(f64, f64)> = None;
     let mut output_arg: Option<String> = None;
@@ -351,6 +352,32 @@ fn main() {
                     std::process::exit(1);
                 }
             }
+            "--crop-box" => {
+                if i + 4 < args.len() {
+                    let mut box_values = [0.0f64; 4];
+                    for (n, value) in box_values.iter_mut().enumerate() {
+                        *value = args[i + 1 + n].parse().unwrap_or_else(|_| {
+                            eprintln!(
+                                "Error: invalid --crop-box value '{}' (expected four numbers in points)",
+                                args[i + 1 + n]
+                            );
+                            std::process::exit(1);
+                        });
+                    }
+                    if box_values[2] <= box_values[0] || box_values[3] <= box_values[1] {
+                        eprintln!(
+                            "Error: --crop-box must read <llx> <lly> <urx> <ury>, with urx > llx and ury > lly"
+                        );
+                        std::process::exit(1);
+                    }
+                    crop_box = Some(box_values);
+                    i += 5;
+                    continue;
+                } else {
+                    eprintln!("Error: --crop-box requires four values: <llx> <lly> <urx> <ury>");
+                    std::process::exit(1);
+                }
+            }
             "--width" => {
                 if i + 1 < args.len() {
                     target_width = Some(args[i + 1].parse().unwrap_or_else(|_| {
@@ -530,6 +557,19 @@ writes all pages to one file",
         std::process::exit(1);
     }
 
+    if crop_box.is_some() && !matches!(device.as_str(), "png" | "viewport-png") {
+        eprintln!(
+            "Error: --crop-box is only supported for --device png (got '{}')",
+            device
+        );
+        std::process::exit(1);
+    }
+
+    if crop_box.is_some() && (target_width.is_some() || target_height.is_some()) {
+        eprintln!("Error: --crop-box cannot be combined with --width/--height");
+        std::process::exit(1);
+    }
+
     if transparent && device != "png" {
         eprintln!(
             "Error: --transparent is only supported for --device png (got '{}')",
@@ -551,6 +591,7 @@ writes all pages to one file",
                 password.as_deref(),
                 target_width,
                 target_height,
+                crop_box,
                 page_size,
                 timeout_secs,
                 max_vm_mb,
@@ -572,6 +613,7 @@ writes all pages to one file",
                 password.as_deref(),
                 target_width,
                 target_height,
+                crop_box,
                 page_size,
                 timeout_secs,
                 max_vm_mb,
@@ -668,11 +710,18 @@ fn run_png_mode(
     password: Option<&str>,
     target_width: Option<u32>,
     target_height: Option<u32>,
+    crop_box: Option<[f64; 4]>,
     page_size: Option<(f64, f64)>,
     timeout_secs: Option<f64>,
     max_vm_mb: Option<u64>,
     output_template: Option<stet_core::output_template::OutputTemplate>,
 ) {
+    // A crop is measured against the page's own boxes, which only PDF input has.
+    if crop_box.is_some() && !(!file_args.is_empty() && file_args.iter().all(|f| is_pdf_file(f))) {
+        eprintln!("Error: --crop-box is only supported for PDF input");
+        std::process::exit(1);
+    }
+
     // Check if all files are PDFs — use fast path (no PS interpreter needed)
     if !file_args.is_empty() && file_args.iter().all(|f| is_pdf_file(f)) {
         let dpi = dpi_override.unwrap_or(300.0);
@@ -687,6 +736,7 @@ fn run_png_mode(
             password,
             target_width,
             target_height,
+            crop_box,
             output_template.as_ref(),
         );
         return;
@@ -1259,6 +1309,12 @@ Common options:
     --timeout <SECONDS>     Abort a job running longer than this. PostScript is
                             Turing-complete, so there is no limit by default;
                             set one when the input is untrusted.
+    --crop-box <llx> <lly> <urx> <ury>
+                            Render only this region of the page, in points in
+                            the PDF's own user space, as the page boxes are
+                            written. The region is rendered directly rather
+                            than cropped out of a finished page. PDF input,
+                            --device png, and not with --width/--height.
     --width <PX>            Override page width (PDF input only). Cannot
                             be combined with --dpi.
     --height <PX>           Override page height (PDF input only). Cannot
@@ -2367,6 +2423,7 @@ fn render_pdf_page_to_rgba(
     use_viewport: bool,
     target_width: Option<u32>,
     target_height: Option<u32>,
+    crop_box: Option<[f64; 4]>,
 ) -> Result<(Vec<u8>, u32, u32), stet_pdf_reader::PdfError> {
     let (page_w, page_h) = doc.page_size(page)?;
     let (pixel_w, pixel_h, effective_dpi) = if target_width.is_some() || target_height.is_some() {
@@ -2379,6 +2436,34 @@ fn render_pdf_page_to_rgba(
             dpi,
         )
     };
+    // A crop is rendered as a region, not cropped out of a finished page: artwork placed from a
+    // small part of a large artboard otherwise pays to rasterize the whole artboard first.
+    if let Some(region) = crop_box {
+        // The reader maps user space to device pixels through the CTM it drew
+        // with, so a rotated page gives the region the artwork actually occupies.
+        let (vp_x, vp_y, vp_w, vp_h) = doc.device_region_for_box(page, region, effective_dpi)?;
+        let out_w = vp_w.round().max(1.0) as u32;
+        let out_h = vp_h.round().max(1.0) as u32;
+        let display_list = doc.render_page(page, effective_dpi)?;
+        let prepared = stet_render::prepare_display_list(&display_list);
+        let rgba = stet_render::render_region_prepared_with_background(
+            &display_list,
+            &prepared,
+            vp_x,
+            vp_y,
+            vp_w,
+            vp_h,
+            out_w,
+            out_h,
+            effective_dpi,
+            Some(doc.icc_cache()),
+            None,
+            no_aa,
+            &stet_graphics::layer_set::LayerSet::new(),
+            transparent,
+        );
+        return Ok((rgba, out_w, out_h));
+    }
     let display_list = doc.render_page(page, effective_dpi)?;
     let rgba = if use_viewport {
         stet_render::render_to_rgba_viewport(
@@ -2416,6 +2501,7 @@ fn run_pdf_input_png(
     password: Option<&str>,
     target_width: Option<u32>,
     target_height: Option<u32>,
+    crop_box: Option<[f64; 4]>,
     output_template: Option<&stet_core::output_template::OutputTemplate>,
 ) {
     let icc_cache = build_icc_cache(icc_cfg);
@@ -2511,6 +2597,7 @@ were selected from '{}'",
                 use_viewport,
                 target_width,
                 target_height,
+                crop_box,
             ) {
                 Ok((rgba, w, h)) => {
                     let out_path = match output_template {

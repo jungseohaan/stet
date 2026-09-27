@@ -48,6 +48,7 @@ pub use skia_device::render_region_prepared;
 pub use skia_device::render_region_prepared_parallel;
 pub use skia_device::render_region_prepared_parallel_cancellable;
 pub use skia_device::render_region_prepared_parallel_with_progress;
+pub use skia_device::render_region_prepared_with_background;
 pub use skia_device::render_region_single_band;
 pub use skia_device::render_to_rgba;
 pub use skia_device::render_to_rgba_viewport;

@@ -10374,11 +10374,52 @@ pub fn render_region_prepared(
     image_cache: Option<&ImageCache>,
     no_aa: bool,
 ) -> Vec<u8> {
+    render_region_prepared_with_background(
+        list,
+        prepared,
+        vp_x,
+        vp_y,
+        vp_w,
+        vp_h,
+        pixel_w,
+        pixel_h,
+        dpi,
+        icc,
+        image_cache,
+        no_aa,
+        &LayerSet::new(),
+        false,
+    )
+}
+
+/// Like [`render_region_prepared`] but honouring a [`LayerSet`] and leaving
+/// the region's unpainted areas transparent when `transparent_background` is
+/// set, as [`render_to_rgba_with_background`] does for a whole page.
+///
+/// Rendering a region rather than the page and cropping afterwards is what
+/// placed artwork wants: an illustration cropped to a small part of a large
+/// artboard otherwise pays for every pixel of the artboard.
+#[expect(clippy::too_many_arguments)]
+pub fn render_region_prepared_with_background(
+    list: &DisplayList,
+    prepared: &PreparedDisplayList,
+    vp_x: f64,
+    vp_y: f64,
+    vp_w: f64,
+    vp_h: f64,
+    pixel_w: u32,
+    pixel_h: u32,
+    dpi: f64,
+    icc: Option<&IccCache>,
+    image_cache: Option<&ImageCache>,
+    no_aa: bool,
+    layer_set: &LayerSet,
+    transparent_background: bool,
+) -> Vec<u8> {
     if pixel_w == 0 || pixel_h == 0 || vp_w <= 0.0 || vp_h <= 0.0 {
         return vec![0xFF; pixel_w as usize * pixel_h as usize * 4];
     }
 
-    let layer_set = LayerSet::new();
     let scale_x = pixel_w as f64 / vp_w;
     let scale_y = pixel_h as f64 / vp_h;
     let effective_dpi = dpi * scale_x;
@@ -10479,14 +10520,13 @@ pub fn render_region_prepared(
                 knockout_painter_pass: KnockoutPainterPass::None,
                 parent_group_isolated: false,
                 alpha_extraction_pass: false,
-                layer_set: &layer_set,
+                layer_set: layer_set,
             };
             render_element(&mut pixmap, &mut state, &elements[i], &ctx);
         }
     }
 
-    // Composite onto white background
-    composite_onto_white(pixmap.data_mut());
+    finish_page_pixels(pixmap.data_mut(), transparent_background);
     // Extract only the requested pixel_h rows (skip the OVERLAP padding at the bottom).
     let row_bytes = pixel_w as usize * 4;
     let end = pixel_h as usize * row_bytes;

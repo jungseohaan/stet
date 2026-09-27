@@ -158,6 +158,13 @@ Common options:
   --no-aa                    Disable anti-aliasing
   --transparent              Leave unpainted areas transparent instead of
                              white paper (--device png only)
+  --crop-box <llx> <lly> <urx> <ury>
+                             Render only this region of the page, in points in
+                             the PDF's own user space. Rendered directly rather
+                             than cropped out of a finished page, so a small
+                             region of a large artboard does not pay for the
+                             whole artboard (PDF input, --device png, not with
+                             --width/--height)
 
 Resource limits (for untrusted input):
   --timeout <SECONDS>        Abort a job running longer than this. No limit
