@@ -2441,9 +2441,20 @@ fn render_pdf_page_to_rgba(
     if let Some(region) = crop_box {
         // The reader maps user space to device pixels through the CTM it drew
         // with, so a rotated page gives the region the artwork actually occupies.
-        let (vp_x, vp_y, vp_w, vp_h) = doc.device_region_for_box(page, region, effective_dpi)?;
-        let out_w = vp_w.round().max(1.0) as u32;
-        let out_h = vp_h.round().max(1.0) as u32;
+        let (raw_x, raw_y, raw_w, raw_h) =
+            doc.device_region_for_box(page, region, effective_dpi)?;
+        // Snap outwards to whole device pixels, and clamp to the page. A region starting at a
+        // fractional pixel would be sampled on its own subpixel phase, so the same artwork would
+        // be antialiased differently from the page it was cut from; whole pixels keep the page's
+        // grid, and rounding outwards keeps a partly covered edge pixel rather than losing it.
+        let x0 = raw_x.floor().max(0.0);
+        let y0 = raw_y.floor().max(0.0);
+        let x1 = (raw_x + raw_w).ceil().min(pixel_w as f64);
+        let y1 = (raw_y + raw_h).ceil().min(pixel_h as f64);
+        let (vp_x, vp_y) = (x0, y0);
+        let (vp_w, vp_h) = ((x1 - x0).max(1.0), (y1 - y0).max(1.0));
+        let out_w = vp_w as u32;
+        let out_h = vp_h as u32;
         let display_list = doc.render_page(page, effective_dpi)?;
         let prepared = stet_render::prepare_display_list(&display_list);
         let rgba = stet_render::render_region_prepared_with_background(
