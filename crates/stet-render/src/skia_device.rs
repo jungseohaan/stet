@@ -10388,13 +10388,13 @@ pub fn render_region_prepared(
         image_cache,
         no_aa,
         &LayerSet::new(),
-        false,
+        PageBackground::White,
     )
 }
 
-/// Like [`render_region_prepared`] but honouring a [`LayerSet`] and leaving
-/// the region's unpainted areas transparent when `transparent_background` is
-/// set, as [`render_to_rgba_with_background`] does for a whole page.
+/// Like [`render_region_prepared`] but honouring a [`LayerSet`] and a
+/// [`PageBackground`], as [`render_to_rgba_with_background`] does for a whole
+/// page.
 ///
 /// Rendering a region rather than the page and cropping afterwards is what
 /// placed artwork wants: an illustration cropped to a small part of a large
@@ -10414,10 +10414,16 @@ pub fn render_region_prepared_with_background(
     image_cache: Option<&ImageCache>,
     no_aa: bool,
     layer_set: &LayerSet,
-    transparent_background: bool,
+    page_background: PageBackground,
 ) -> Vec<u8> {
     if pixel_w == 0 || pixel_h == 0 || vp_w <= 0.0 || vp_h <= 0.0 {
-        return vec![0xFF; pixel_w as usize * pixel_h as usize * 4];
+        // As for a whole page: a blank answer answers what was asked.
+        let fill = if page_background.is_transparent() {
+            0x00
+        } else {
+            0xFF
+        };
+        return vec![fill; pixel_w as usize * pixel_h as usize * 4];
     }
 
     let scale_x = pixel_w as f64 / vp_w;
@@ -10526,7 +10532,7 @@ pub fn render_region_prepared_with_background(
         }
     }
 
-    finish_page_pixels(pixmap.data_mut(), transparent_background);
+    finish_page_pixels(pixmap.data_mut(), page_background);
     // Extract only the requested pixel_h rows (skip the OVERLAP padding at the bottom).
     let row_bytes = pixel_w as usize * 4;
     let end = pixel_h as usize * row_bytes;

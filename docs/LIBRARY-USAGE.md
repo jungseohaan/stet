@@ -113,6 +113,7 @@ artwork actually occupies:
 ```rust
 use stet_pdf_reader::PdfDocument;
 use stet_graphics::layer_set::LayerSet;
+use stet_render::PageBackground;
 
 let doc = PdfDocument::from_bytes(&pdf_data)?;
 let dpi = 300.0;
@@ -130,7 +131,7 @@ let rgba = stet_render::render_region_prepared_with_background(
     None,                             // image cache
     false,                            // no_aa
     &LayerSet::new(),
-    true,                             // transparent
+    PageBackground::Transparent,
 );
 ```
 

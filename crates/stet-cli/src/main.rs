@@ -2471,7 +2471,7 @@ fn render_pdf_page_to_rgba(
             None,
             no_aa,
             &stet_graphics::layer_set::LayerSet::new(),
-            transparent,
+            page_background(transparent),
         );
         return Ok((rgba, out_w, out_h));
     }
